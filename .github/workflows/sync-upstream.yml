@@ -1,45 +1,65 @@
-name: Sync upstream repo
+name: Mirror upstream (force sync)
 
 on:
   schedule:
-    - cron: '0 0 * * *'   # 示例：每小时一次，按需改为 '0 0 * * *'（每天）
+    - cron: '0 0 * * *'   # 每小时一次，改为 '0 0 * * *' 每天一次
   workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout fork (shallow)
+      - name: Checkout fork (full)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Add upstream and fetch default branch shallow
-        run: |
-          git remote add upstream https://github.com/morluto/rea.git || true
-          if git ls-remote --heads upstream main; then
-            git fetch --no-tags --depth=1 upstream main
-            UPSTREAM_REF=upstream/main
-          elif git ls-remote --heads upstream master; then
-            git fetch --no-tags --depth=1 upstream master
-            UPSTREAM_REF=upstream/master
-          else
-            echo "No main/master on upstream"
-            exit 0
-          fi
-
-      - name: Merge (ff-only preferred)
-        run: |
-          TARGET_BRANCH=$(git rev-parse --abbrev-ref HEAD || echo main)
-          git checkout -B "$TARGET_BRANCH"
-          if git merge --ff-only "$UPSTREAM_REF"; then
-            echo "Fast-forwarded"
-          else
-            git merge --no-edit "$UPSTREAM_REF" || { echo 'Merge failed (conflict)'; exit 1; }
-          fi
-
-      - name: Push to fork
+      - name: Fetch upstream and force-sync
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git push origin HEAD:"$TARGET_BRANCH" || echo "Nothing to push or push failed"
+          set -euo pipefail
+
+          REPO="${GITHUB_REPOSITORY}"   # owner/repo
+          echo "Repository: $REPO"
+
+          # target branch on fork (local checked-out branch). Use default branch if detached.
+          TARGET_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+          echo "Target branch: $TARGET_BRANCH"
+
+          # ensure we are on target branch
+          git checkout -B "$TARGET_BRANCH"
+
+          # add/fetch upstream
+          git remote add upstream https://github.com/morluto/rea.git || true
+          # fetch the upstream branch (shallow)
+          if git ls-remote --heads upstream main >/dev/null 2>&1; then
+            UPSTREAM_NAME=main
+          elif git ls-remote --heads upstream master >/dev/null 2>&1; then
+            UPSTREAM_NAME=master
+          else
+            echo "No main/master on upstream — aborting."
+            exit 0
+          fi
+          echo "Upstream branch: $UPSTREAM_NAME"
+          git fetch --no-tags --depth=1 upstream "$UPSTREAM_NAME"
+
+          # upstream latest commit SHA
+          UPSTREAM_SHA=$(git rev-parse "FETCH_HEAD")
+          echo "Upstream SHA: $UPSTREAM_SHA"
+
+          # current origin SHA for the target branch
+          ORIGIN_SHA=$(git rev-parse "origin/${TARGET_BRANCH}" 2>/dev/null || echo "")
+
+          if [ "$UPSTREAM_SHA" = "$ORIGIN_SHA" ]; then
+            echo "Already up-to-date with upstream. Nothing to do."
+            exit 0
+          fi
+
+          # Reset local target branch to upstream commit and force-push to origin
+          git reset --hard "$UPSTREAM_SHA"
+          echo "Reset $TARGET_BRANCH to upstream $UPSTREAM_SHA"
+
+          # Force push to overwrite fork branch so fork matches upstream exactly
+          git push --force origin "HEAD:${TARGET_BRANCH}"
+          echo "Force-pushed to origin/${TARGET_BRANCH}. Fork is now identical to upstream."
